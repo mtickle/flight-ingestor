@@ -27,8 +27,8 @@ const (
 	apiRadiusNM = 50
 
 	// --- Proximity Alert Zone ---
-	proximityRadiusNM   = 50.0
-	proximityAltitudeFT = 12000.0
+	proximityRadiusNM   = 5.0
+	proximityAltitudeFT = 2000.0
 	earthRadiusNM       = 3440.065
 
 	// --- Other Consts ---
