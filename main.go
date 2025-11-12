@@ -2,29 +2,26 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
-	"os" // <-- Added for environment variables
+	"os" // Added for environment variables
 	"strconv"
 	"sync"
 	"time"
 
-	"github.com/joho/godotenv" // <-- Added for .env files
-	_ "github.com/lib/pq"
+	"github.com/joho/godotenv" // Added for .env files
 )
 
-//--- Configuration
-
+// --- Configuration ---
 const (
-	//--- API Parameters for fetching
+	// --- API Parameters for fetching ---
 	apiLat      = 35.740971
 	apiLng      = -78.498878
-	apiRadiusNM = 50
+	apiRadiusNM = 50 // Your large fetch radius (e.g., 50)
 
 	// --- Proximity Alert Zone ---
 	proximityRadiusNM   = 5.0
@@ -41,7 +38,7 @@ const (
 // --- Global Variables ---
 var (
 	adsbAPIURL = fmt.Sprintf("https://api.adsb.lol/v2/point/%.6f/%.6f/%d", apiLat, apiLng, apiRadiusNM)
-	db         *sql.DB // Global database connection pool
+
 	// --- Loaded from .env in main() ---
 	discordWebhookURL string
 )
@@ -62,7 +59,7 @@ type Aircraft struct {
 	Lon     float64 `json:"lon"`
 }
 
-// --- Structs for ADSBdb.com (Cache) ---
+// --- Structs for ADSBdb.com (still needed for parsing) ---
 type AircraftDetail struct {
 	Hex          string `json:"hex"`
 	Registration string `json:"registration"`
@@ -74,8 +71,6 @@ type AircraftDetail struct {
 	FullImageURL string
 }
 
-// --- NEW ---
-// AdsbDbApiResponse matches the *exact* nested structure from adsbdb.com
 type AdsbDbApiResponse struct {
 	Response struct {
 		Aircraft struct {
@@ -102,17 +97,15 @@ type DiscordWebhook struct {
 	Embeds []Embed `json:"embeds"`
 }
 type Embed struct {
-	Title       string    `json:"title"`
-	Description string    `json:"description,omitempty"`
-	Color       int       `json:"color"`
-	Fields      []Field   `json:"fields"`
-	URL         string    `json:"url"`
-	Footer      Footer    `json:"footer"`
-	Thumbnail   Thumbnail `json:"thumbnail,omitempty"` // <-- ADD THIS
+	Title       string  `json:"title"`
+	Description string  `json:"description,omitempty"`
+	Color       int     `json:"color"`
+	Fields      []Field `json:"fields"`
+	URL         string  `json:"url"`
+	Footer      Footer  `json:"footer"`
+	Image       Image   `json:"image,omitempty"` // Using large image
 }
-
-// --- ADD THIS NEW STRUCT ---
-type Thumbnail struct {
+type Image struct {
 	URL string `json:"url"`
 }
 type Field struct {
@@ -125,8 +118,6 @@ type Footer struct {
 }
 
 // --- State Management ---
-
-// AircraftState stores what we've seen and alerted on
 type AircraftState struct {
 	LastSquawk       string
 	MilAlerted       bool
@@ -145,27 +136,23 @@ var (
 
 // --- Main Application ---
 func main() {
-	fmt.Println("Starting ADSB Alerter...")
+	fmt.Println("Starting ADSB Alerter (No-DB Version)...")
 
-	// --- NEW: Load .env file ---
+	// --- Load .env file ---
 	err := godotenv.Load()
 	if err != nil {
 		fmt.Println("Warning: Could not find .env file, reading from environment.")
 	}
 
-	// --- NEW: Load Discord webhook from env ---
+	// --- Load Discord webhook from env ---
 	discordWebhookURL = os.Getenv("DISCORD_WEBHOOK_URL")
 	if discordWebhookURL == "" {
 		fmt.Println("FATAL: DISCORD_WEBHOOK_URL not set in environment")
 		return
 	}
 
-	// --- Connect to Postgres ---
-	if err := initDB(); err != nil {
-		fmt.Printf("FATAL: Failed to connect to database: %v\n", err)
-		return // Exit if DB connection fails
-	}
-	fmt.Println("Successfully connected to PostgreSQL.")
+	// --- NOTE: initDB() call is GONE ---
+	fmt.Println("Database connection is disabled.")
 
 	// --- Load watchlist in a separate goroutine ---
 	go manageWatchlist()
@@ -174,44 +161,7 @@ func main() {
 	mainLoop()
 }
 
-// --- NEW: Database Initialization ---
-// --- UPDATED: Database Initialization ---
-func initDB() error {
-	// Read the individual components from the .env file
-	user := os.Getenv("DATABASE_USERNAME")
-	host := os.Getenv("DATABASE_HOST")
-	dbname := os.Getenv("DATABASE_NAME")
-	password := os.Getenv("DATABASE_PASSWORD")
-	port := os.Getenv("DATABASE_PORT")
-
-	// Check that all required variables are loaded
-	if user == "" || host == "" || dbname == "" || password == "" || port == "" {
-		return fmt.Errorf("missing one or more required database environment variables")
-	}
-
-	// Construct the connection string
-	// Using key=value format is safer for passwords with special characters.
-	// We use "sslmode=require" because aivencloud.com is a remote, secure host.
-	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=require",
-		host,
-		port,
-		user,
-		password,
-		dbname,
-	)
-
-	var err error
-	db, err = sql.Open("postgres", connStr)
-	if err != nil {
-		return err
-	}
-
-	// Ping the database to ensure the connection is live
-	if err = db.Ping(); err != nil {
-		return err
-	}
-	return nil
-}
+// --- NOTE: initDB() function is GONE ---
 
 // --- Goroutine to manage fetching the watchlist ---
 func manageWatchlist() {
@@ -235,9 +185,8 @@ func manageWatchlist() {
 		}
 
 		newWatchlist := make(map[string]WatchlistEntry)
-		// For this CSV, icao=0, registration=1, plane_type=4, note=6
 		for i, row := range records {
-			if i == 0 { // Skip header row
+			if i == 0 {
 				continue
 			}
 			if len(row) > 6 {
@@ -257,7 +206,6 @@ func manageWatchlist() {
 		fmt.Printf("Successfully loaded %d aircraft into watchlist.\n", len(globalWatchlist))
 	}
 
-	// Run immediately on start, then wait for ticker
 	loadWatchlistFromCSV()
 	for range ticker.C {
 		loadWatchlistFromCSV()
@@ -277,8 +225,6 @@ func mainLoop() {
 }
 
 // --- Helper Functions ---
-
-// formatAltitudeString safely handles the "any" type from ac.AltBaro
 func formatAltitudeString(alt any) string {
 	switch v := alt.(type) {
 	case float64:
@@ -290,7 +236,6 @@ func formatAltitudeString(alt any) string {
 	}
 }
 
-// haversine calculates the distance between two lat/lon points in nautical miles
 func haversine(lat1, lon1, lat2, lon2 float64) float64 {
 	radLat1 := lat1 * math.Pi / 180
 	radLon1 := lon1 * math.Pi / 180
@@ -307,11 +252,9 @@ func haversine(lat1, lon1, lat2, lon2 float64) float64 {
 }
 
 // --- Core Logic ---
-
 func fetchAndProcessAircraft() {
 	fmt.Println("Fetching new aircraft data...")
 
-	// 1. Fetch Data from ADSB.lol
 	resp, err := http.Get(adsbAPIURL)
 	if err != nil {
 		fmt.Printf("Error fetching ADSB data: %v\n", err)
@@ -338,20 +281,16 @@ func fetchAndProcessAircraft() {
 
 	fmt.Printf("Processing %d aircraft...\n", len(data.Aircraft))
 
-	// 2. Process Each Aircraft
 	for _, ac := range data.Aircraft {
-		// Save every sighting to the log
-		saveSightingToPostgres(ac)
+		// --- NOTE: saveSightingToPostgres() call is GONE ---
 
 		// Check if this aircraft triggers an alert
 		processAircraftAlerts(ac)
 	}
 
-	// 3. Clean up old state
 	cleanupOldState()
 }
 
-// processAircraftAlerts checks a single aircraft against our rules
 func processAircraftAlerts(ac Aircraft) {
 	hex := ac.Hex
 	squawk := ac.Squawk
@@ -359,15 +298,15 @@ func processAircraftAlerts(ac Aircraft) {
 	isEmergency := (squawk == "7700" || squawk == "7600" || squawk == "7500")
 
 	// --- Trigger 1: Watchlist Hit (Highest Priority) ---
-	watchlistMutex.RLock() // Lock for reading
+	watchlistMutex.RLock()
 	entry, onWatchlist := globalWatchlist[hex]
-	watchlistMutex.RUnlock() // Unlock
+	watchlistMutex.RUnlock()
 
 	if onWatchlist {
 		if !seen || !currentState.WatchlistAlerted {
 			fmt.Printf("!!! WATCHLIST DETECTED: %s (Note: %s)\n", hex, entry.Note)
 
-			details, err := getAircraftDetails(hex)
+			details, err := getAircraftDetails(hex) // Fetch on-demand
 			if err != nil {
 				fmt.Printf("Error getting details for %s: %v\n", hex, err)
 			}
@@ -375,7 +314,6 @@ func processAircraftAlerts(ac Aircraft) {
 
 			currentState.WatchlistAlerted = true
 		}
-		// Update state and return regardless
 		currentState.LastSquawk = squawk
 		currentState.LastSeen = time.Now()
 		globalAircraftState[hex] = currentState
@@ -387,7 +325,7 @@ func processAircraftAlerts(ac Aircraft) {
 		if !seen || currentState.LastSquawk != squawk {
 			fmt.Printf("!!! EMERGENCY DETECTED: %s (Flight: %s) squawking %s\n", hex, ac.Flight, squawk)
 
-			details, err := getAircraftDetails(hex)
+			details, err := getAircraftDetails(hex) // Fetch on-demand
 			if err != nil {
 				fmt.Printf("Error getting details for %s: %v\n", hex, err)
 			}
@@ -404,7 +342,7 @@ func processAircraftAlerts(ac Aircraft) {
 		if !seen || !currentState.MilAlerted {
 			fmt.Printf("!!! MILITARY DETECTED: %s (Flight: %s)\n", hex, ac.Flight)
 
-			details, err := getAircraftDetails(hex)
+			details, err := getAircraftDetails(hex) // Fetch on-demand
 			if err != nil {
 				fmt.Printf("Error getting details for %s: %v\n", hex, err)
 			}
@@ -421,27 +359,22 @@ func processAircraftAlerts(ac Aircraft) {
 	distanceNM := haversine(apiLat, apiLng, ac.Lat, ac.Lon)
 
 	if distanceNM <= proximityRadiusNM {
-		// Inside the 5nm zone. Check altitude.
 		altStr := formatAltitudeString(ac.AltBaro)
 		altitudeFT, err := strconv.ParseFloat(altStr, 64)
 
 		if err == nil && altitudeFT > 0 && altitudeFT <= proximityAltitudeFT {
-			// This is a valid "overhead" plane.
 			if !seen || !currentState.ProximityAlerted {
 				fmt.Printf("!!! PROXIMITY DETECTED: %s (%.1f nm, %.0f ft)\n", ac.Hex, distanceNM, altitudeFT)
 
-				details, _ := getAircraftDetails(hex)
+				details, _ := getAircraftDetails(hex) // Fetch on-demand
 				sendDiscordAlert(ac, details, "proximity", nil)
 
 				currentState.ProximityAlerted = true
 			}
 		} else {
-			// Inside 5nm zone, but too high (or on ground). Reset flag.
 			currentState.ProximityAlerted = false
 		}
 	} else {
-		// --- Plane is OUTSIDE the 5nm zone ---
-		// Reset the proximity flag so it can re-trigger if it enters.
 		currentState.ProximityAlerted = false
 	}
 
@@ -451,9 +384,8 @@ func processAircraftAlerts(ac Aircraft) {
 	globalAircraftState[hex] = currentState
 }
 
-// cleanupOldState removes aircraft from memory if not seen for a while
 func cleanupOldState() {
-	cutoff := time.Now().Add(-30 * time.Minute) // 30-minute cutoff
+	cutoff := time.Now().Add(-30 * time.Minute)
 	removedCount := 0
 
 	keysToDelete := []string{}
@@ -475,55 +407,18 @@ func cleanupOldState() {
 	}
 }
 
-// --- Database Functions ---
+// --- NOTE: saveSightingToPostgres() function is GONE ---
 
-// saveSightingToPostgres logs every aircraft sighting
-func saveSightingToPostgres(ac Aircraft) {
-	if db == nil {
-		fmt.Println("DB is nil, skipping sighting save.")
-		return
-	}
-
-	altStr := formatAltitudeString(ac.AltBaro)
-
-	sql := `INSERT INTO aircraft_sightings (hex, flight, n_number, squawk, mil, alt_baro, gs, lat, lon)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
-
-	_, err := db.Exec(sql, ac.Hex, ac.Flight, ac.NNumber, ac.Squawk, ac.Mil, altStr, ac.GS, ac.Lat, ac.Lon)
-	if err != nil {
-		fmt.Printf("DB_SIGHTING_SAVE ERROR for %s: %v\n", ac.Hex, err)
-	}
-}
-
-// getAircraftDetails fetches rich data, using the DB as a cache
+// --- UPDATED: getAircraftDetails (No Cache) ---
+// This function now fetches from the API every single time.
 func getAircraftDetails(hex string) (AircraftDetail, error) {
 	var detail AircraftDetail
-	if db == nil {
-		fmt.Println("DB is nil, cannot get aircraft details.")
-		return detail, fmt.Errorf("database not connected")
-	}
 
-	// --- Step 1: Query your Postgres Cache ---
-	// UPDATED: Added thumbnail_url to the SELECT
-	row := db.QueryRow("SELECT hex, registration, airline, owner, aircraft_type, note, thumbnail_url FROM aircraft_details WHERE hex = $1", hex)
-	// UPDATED: Added &detail.ThumbnailURL to the Scan
-	err := row.Scan(&detail.Hex, &detail.Registration, &detail.Airline, &detail.Owner, &detail.AircraftType, &detail.Note, &detail.ThumbnailURL)
-
-	if err == nil {
-		// Found in cache!
-		fmt.Printf("CACHE HIT: Found details for %s in DB\n", hex)
-		return detail, nil
-	}
-
-	if err != sql.ErrNoRows {
-		// A real database error occurred
-		return detail, fmt.Errorf("DB query error for %s: %v", hex, err)
-	}
-
-	// --- Step 2: Not in cache (sql.ErrNoRows), so fetch from API ---
-	fmt.Printf("CACHE MISS: Fetching details for %s from adsbdb.com\n", hex)
+	// --- Step 1: No cache, always fetch from API ---
+	fmt.Printf("API FETCH: Fetching details for %s from adsbdb.com\n", hex)
 	apiURL := adsbdbAPIURL + hex
 	resp, err := http.Get(apiURL)
+	fmt.Println(apiURL)
 	if err != nil {
 		return detail, fmt.Errorf("API fetch error for %s: %v", hex, err)
 	}
@@ -543,7 +438,8 @@ func getAircraftDetails(hex string) (AircraftDetail, error) {
 	detail.Registration = apiResponse.Response.Aircraft.Registration
 	detail.AircraftType = apiResponse.Response.Aircraft.Type
 	detail.Owner = apiResponse.Response.Aircraft.Owner
-	detail.ThumbnailURL = apiResponse.Response.Aircraft.ThumbnailURL // <-- ADD THIS
+	detail.ThumbnailURL = apiResponse.Response.Aircraft.ThumbnailURL
+	detail.FullImageURL = apiResponse.Response.Aircraft.FullImageURL
 
 	if apiResponse.Response.Aircraft.AirlineFlag != "" {
 		detail.Airline = apiResponse.Response.Aircraft.AirlineFlag
@@ -551,24 +447,10 @@ func getAircraftDetails(hex string) (AircraftDetail, error) {
 		detail.Airline = apiResponse.Response.Aircraft.Owner // Fallback
 	}
 
-	// --- Step 3: Save new data to cache ---
-	// UPDATED: Added thumbnail_url to the INSERT
-	_, err = db.Exec(`INSERT INTO aircraft_details (hex, registration, airline, owner, aircraft_type, note, thumbnail_url, last_fetched_at)
-	                  VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-	                  ON CONFLICT (hex) DO UPDATE SET 
-	                  registration = $2, airline = $3, owner = $4, aircraft_type = $5, note = $6, thumbnail_url = $7, last_fetched_at = NOW()`,
-		detail.Hex, detail.Registration, detail.Airline, detail.Owner, detail.AircraftType, detail.Note, detail.ThumbnailURL)
-
-	if err != nil {
-		fmt.Printf("DB CACHE_SAVE ERROR for %s: %v\n", hex, err)
-	}
-
+	// --- Step 3: No cache, so no DB save ---
 	return detail, nil
 }
 
-// --- Discord Alerting ---
-
-// sendDiscordAlert formats and sends the webhook
 // --- Discord Alerting ---
 func sendDiscordAlert(ac Aircraft, details AircraftDetail, alertType string, entry *WatchlistEntry) {
 	if discordWebhookURL == "" {
@@ -586,7 +468,8 @@ func sendDiscordAlert(ac Aircraft, details AircraftDetail, alertType string, ent
 		description = fmt.Sprintf("**Note:** %s", entry.Note)
 		color = 16776960 // Yellow
 	case "emergency":
-		title = fmt.Sprintf("🔴 EMERGENCY: SQUAWK %s", ac.Squawk)
+		title = "🔴 EMERGENCY"
+		description = fmt.Sprintf("Squawking: **%s**", ac.Squawk)
 		color = 16711680 // Red
 	case "military":
 		title = "✈️ Military Aircraft Detected"
@@ -595,6 +478,10 @@ func sendDiscordAlert(ac Aircraft, details AircraftDetail, alertType string, ent
 		title = "📡 LOW-FLYING: Overhead Alert"
 		description = fmt.Sprintf("**Aircraft is at %s ft within 5nm**", altStr)
 		color = 16753920 // Orange
+	}
+
+	if details.FullImageURL != "" {
+		description = fmt.Sprintf("[View Full Image](%s)\n%s", details.FullImageURL, description)
 	}
 
 	fields := []Field{
@@ -609,22 +496,19 @@ func sendDiscordAlert(ac Aircraft, details AircraftDetail, alertType string, ent
 		{Name: "Airline", Value: details.Airline, Inline: false},
 	}
 
-	// Create the base embed
 	embed := Embed{
 		Title:       title,
 		Description: description,
 		Color:       color,
 		URL:         fmt.Sprintf("https://globe.adsb.lol/?icao=%s", ac.Hex),
 		Fields:      fields,
-		Footer:      Footer{Text: "ADSB.lol Alerter (Refined)"},
+		Footer:      Footer{Text: "ADSB.lol Alerter (No-DB)"},
 	}
 
-	// --- ADD THIS BLOCK ---
-	// If a thumbnail URL exists in our cache, add it to the embed
-	if details.ThumbnailURL != "" {
-		embed.Thumbnail = Thumbnail{URL: details.ThumbnailURL}
+	// Use the large image slot
+	if details.FullImageURL != "" {
+		embed.Image = Image{URL: details.FullImageURL}
 	}
-	// ---------------------
 
 	payload, _ := json.Marshal(DiscordWebhook{Embeds: []Embed{embed}})
 	resp, err := http.Post(discordWebhookURL, "application/json", bytes.NewBuffer(payload))
