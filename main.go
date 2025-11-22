@@ -42,7 +42,7 @@ const (
 // --- Global Variables ---
 var (
 	radiusAPIURL         = fmt.Sprintf("https://api.adsb.lol/v2/point/%.6f/%.6f/%d", apiLat, apiLng, apiRadiusNM)
-	specialAircraftTypes = []string{"B52", "B1", "B2", "U2", "C5", "HRON", "P8"}
+	specialAircraftTypes = []string{"B52", "B1", "B2", "U2", "Q4", "HRON"}
 )
 
 // --- Structs for ADSB.lol API (Sightings) ---
@@ -509,21 +509,21 @@ func sendDiscordAlert(webhookURL string, ac Aircraft, details AircraftDetail, al
 
 	switch alertType {
 	case "watchlist":
-		title = "⭐️ Watchlist Alert (50nm)"
+		title = "Watchlist Alert (50nm)"
 		description = fmt.Sprintf("**Note:** %s", entry.Note)
 		color = 16776960 // Yellow
 	case "emergency":
-		title = fmt.Sprintf("🔴 EMERGENCY: SQUAWK %s", ac.Squawk)
+		title = fmt.Sprintf("EMERGENCY: SQUAWK %s", ac.Squawk)
 		color = 16711680 // Red
 	case "military":
-		title = "✈️ Military Aircraft (50nm)"
+		title = "Military Aircraft (50nm)"
 		color = 3447003 // Blue
 	case "proximity":
-		title = "📡 Proximity Alert"
+		title = "Proximity Alert"
 		description = fmt.Sprintf("**Aircraft is at %s ft within 5nm**", altStr)
 		color = 16753920 // Orange
 	case "special_military":
-		title = fmt.Sprintf("🌎 Special Military Flight: %s", ac.Type)
+		title = fmt.Sprintf("Military Flight: %s", ac.Type)
 		color = 11290111 // Purple
 	}
 
