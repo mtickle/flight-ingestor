@@ -42,7 +42,7 @@ const (
 // --- Global Variables ---
 var (
 	radiusAPIURL         = fmt.Sprintf("https://api.adsb.lol/v2/point/%.6f/%.6f/%d", apiLat, apiLng, apiRadiusNM)
-	specialAircraftTypes = []string{"B52", "B1", "B2", "U2", "Q4", "HRON"}
+	specialAircraftTypes = []string{"B52", "B1", "B2", "U2", "Q4", "HRON","B742"}
 )
 
 // --- Structs for ADSB.lol API (Sightings) ---
