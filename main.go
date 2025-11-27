@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio" // <-- NEW
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
@@ -8,7 +9,9 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os" // <-- NEW
 	"strconv"
+	"strings" // <-- NEW
 	"sync"
 	"time"
 )
@@ -19,6 +22,9 @@ const (
 	discordHookWatchlist  = "https://discord.com/api/webhooks/1436316981333725205/PvSP1_13ynSKkyD1r8dCp4q5tbHk4l1d9d_4ZmlsFwX1cgU0OQmrw6mjbDpoCKUHGlDb"
 	discordHookProximity  = "https://discord.com/api/webhooks/1438488461144363009/XGc49LiPecDgeWyzIytsPcueb3NaigguaZc70EAh9qjtCJp6vzlIW73FQo_8rqq9yedZ"
 	discordHookSpecialMil = "https://discord.com/api/webhooks/1438488588814647326/7tw61cX27pkDJKoF23r2FkxSTJ4JWEhDkRzzfHpp6x_d7YRdgd9J6SGoVUDDACUtGUXD"
+
+	//--- Files
+	militaryTypesFile = "military_types.txt" // <-- NEW: Local config file
 
 	//--- API Parameters for Radius Fetching
 	apiLat      = 35.740971
@@ -31,7 +37,7 @@ const (
 	earthRadiusNM       = 3440.065
 
 	//--- Other Consts
-	adsbdbAPIURL           = "https://api.adsbdb.com/v0/aircraft/" // Append {HEX}
+	adsbdbAPIURL           = "https://api.adsbdb.com/v0/aircraft/"
 	watchlistCSVURL        = "https://raw.githubusercontent.com/sdr-enthusiasts/plane-alert-db/main/plane-alert-db-images.csv"
 	geoapifyAPIKey         = "ee4bfc4e00464753b85aa66ae3b23da6"
 	radiusPollInterval     = 60 * time.Second
@@ -41,8 +47,8 @@ const (
 
 // --- Global Variables ---
 var (
-	radiusAPIURL         = fmt.Sprintf("https://api.adsb.lol/v2/point/%.6f/%.6f/%d", apiLat, apiLng, apiRadiusNM)
-	specialAircraftTypes = []string{"B52", "B1", "B2", "U2", "Q4", "HRON","B742"}
+	radiusAPIURL = fmt.Sprintf("https://api.adsb.lol/v2/point/%.6f/%.6f/%d", apiLat, apiLng, apiRadiusNM)
+	// specialAircraftTypes REMOVED - We load this dynamically now
 )
 
 // --- Structs for ADSB.lol API (Sightings) ---
@@ -59,10 +65,10 @@ type Aircraft struct {
 	AltBaro any     `json:"alt_baro"`
 	GS      float64 `json:"gs"`
 
-	Lat any `json:"lat"` // For /v2/point API
-	Lon any `json:"lon"` // For /v2/point API
+	Lat any `json:"lat"`
+	Lon any `json:"lon"`
 
-	LastPos struct { // For /v2/type API
+	LastPos struct {
 		Lat any `json:"lat"`
 		Lon any `json:"lon"`
 	} `json:"lastPosition"`
@@ -76,10 +82,11 @@ type AircraftDetail struct {
 	Note         string `json:"note"`
 	ThumbnailURL string
 	FullImageURL string
+	CountryName  string
+	CountryISO   string
 }
 type AdsbDbApiResponse struct {
 	Response struct {
-		// Path 1: Nested (for commercial)
 		Aircraft struct {
 			Type         string `json:"type"`
 			Registration string `json:"registration"`
@@ -87,11 +94,15 @@ type AdsbDbApiResponse struct {
 			AirlineFlag  string `json:"registered_owner_operator_flag_code"`
 			ThumbnailURL string `json:"url_photo_thumbnail"`
 			FullImageURL string `json:"url_photo"`
+			CountryName  string `json:"registered_owner_country_name"`
+			CountryISO   string `json:"registered_owner_country_iso_name"`
 		} `json:"aircraft"`
 
 		Type_flat         string `json:"type"`
 		Registration_flat string `json:"registration"`
 		Owner_flat        string `json:"owner"`
+		CountryName_flat  string `json:"registered_owner_country_name"`
+		CountryISO_flat   string `json:"registered_owner_country_iso_name"`
 	} `json:"response"`
 }
 type WatchlistEntry struct {
@@ -110,7 +121,7 @@ type Embed struct {
 	Fields      []Field   `json:"fields"`
 	URL         string    `json:"url"`
 	Footer      Footer    `json:"footer"`
-	Image       Image     `json:"image,omitempty"` // Using large image
+	Image       Image     `json:"image,omitempty"`
 	Thumbnail   Thumbnail `json:"thumbnail,omitempty"`
 }
 type Image struct {
@@ -137,7 +148,7 @@ type RadiusAircraftState struct {
 
 var globalRadiusState = make(map[string]RadiusAircraftState)
 
-// --- State for the worldwide poller (stores last alert time)
+// --- State for the worldwide poller
 var globalNationwideState = make(map[string]time.Time)
 var nationwideStateMutex = &sync.Mutex{}
 
@@ -149,25 +160,21 @@ var (
 
 // --- Main Application ---
 func main() {
-
-	// Start the three main background tasks
-	go manageWatchlist()    // Runs every 24 hours
-	go mainRadiusLoop()     // Runs every 60 seconds
-	go mainNationwideLoop() // Runs every 10 minutes
-
-	// This is a simple way to keep the app alive
+	go manageWatchlist()
+	go mainRadiusLoop()
+	go mainNationwideLoop()
 	select {}
 }
 
-// --- This is grabbing the secret watchlist from Github and holding it in memory.
+// --- Watchlist Manager
 func manageWatchlist() {
 	ticker := time.NewTicker(watchlistInterval)
 	defer ticker.Stop()
 	loadWatchlistFromCSV := func() {
-		////fmt.Println("[WL] Refreshing aircraft watchlist from GitHub...")
+		fmt.Println("[WL] Refreshing aircraft watchlist from GitHub...")
 		resp, err := http.Get(watchlistCSVURL)
 		if err != nil {
-			//fmt.Printf("[WL] Error fetching watchlist CSV: %v\n", err)
+			fmt.Printf("[WL] Error fetching watchlist CSV: %v\n", err)
 			return
 		}
 		defer resp.Body.Close()
@@ -175,7 +182,7 @@ func manageWatchlist() {
 		reader := csv.NewReader(resp.Body)
 		records, err := reader.ReadAll()
 		if err != nil {
-			//fmt.Printf("[WL] Error parsing watchlist CSV: %v\n", err)
+			fmt.Printf("[WL] Error parsing watchlist CSV: %v\n", err)
 			return
 		}
 
@@ -198,7 +205,7 @@ func manageWatchlist() {
 		watchlistMutex.Lock()
 		globalWatchlist = newWatchlist
 		watchlistMutex.Unlock()
-		////fmt.Printf("[WL] Successfully loaded %d aircraft into watchlist.\n", len(globalWatchlist))
+		fmt.Printf("[WL] Successfully loaded %d aircraft into watchlist.\n", len(globalWatchlist))
 	}
 
 	loadWatchlistFromCSV()
@@ -207,50 +214,71 @@ func manageWatchlist() {
 	}
 }
 
-// --- Main 50nm Radius Poller (Watchlist & Proximity) ---
+// --- Main 50nm Radius Poller ---
 func mainRadiusLoop() {
 	ticker := time.NewTicker(radiusPollInterval)
 	defer ticker.Stop()
 
 	for {
-		////fmt.Println("[RD] Fetching new aircraft data (50nm)...")
+		// fmt.Println("[RD] Fetching new aircraft data (50nm)...")
 		resp, err := http.Get(radiusAPIURL)
 		if err != nil {
-			//fmt.Printf("[RD] Error fetching ADSB data: %v\n", err)
-			time.Sleep(radiusPollInterval) // Wait before retrying
+			fmt.Printf("[RD] Error fetching ADSB data: %v\n", err)
+			time.Sleep(radiusPollInterval)
 			continue
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			//fmt.Printf("[RD] ADSB API returned non-200 status: %s\n", resp.Status)
+			fmt.Printf("[RD] ADSB API returned non-200 status: %s\n", resp.Status)
 			time.Sleep(radiusPollInterval)
 			continue
 		}
 
 		bodyBytes, err := io.ReadAll(resp.Body)
 		if err != nil {
-			//fmt.Printf("[RD] Error reading response body: %v\n", err)
+			fmt.Printf("[RD] Error reading response body: %v\n", err)
 			time.Sleep(radiusPollInterval)
 			continue
 		}
 
 		var data ADSBResponse
 		if err := json.Unmarshal(bodyBytes, &data); err != nil {
-			//fmt.Printf("[RD] Error decoding JSON: %v\n", err)
+			fmt.Printf("[RD] Error decoding JSON: %v\n", err)
 			time.Sleep(radiusPollInterval)
 			continue
 		}
 
-		//fmt.Printf("[RD] Processing %d aircraft...\n", len(data.Aircraft))
+		// fmt.Printf("[RD] Processing %d aircraft...\n", len(data.Aircraft))
 		for _, ac := range data.Aircraft {
 			processRadiusAlerts(ac)
 		}
 		cleanupRadiusState()
 
-		//fmt.Printf("[RD] Waiting for next poll in %v\n", radiusPollInterval)
+		// fmt.Printf("[RD] Waiting for next poll in %v\n", radiusPollInterval)
 		<-ticker.C
 	}
+}
+
+// --- NEW: Helper to load types from text file ---
+func loadSpecialTypes() []string {
+	var types []string
+	file, err := os.Open(militaryTypesFile)
+	if err != nil {
+		fmt.Printf("[SM] Warning: Could not read %s. Using default list.\n", militaryTypesFile)
+		return []string{"B52", "B1", "B2", "U2", "C5", "HRON", "P8"} // Fallback defaults
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		// Ignore empty lines or comments
+		if line != "" && !strings.HasPrefix(line, "#") {
+			types = append(types, line)
+		}
+	}
+	return types
 }
 
 // --- Main Special Military
@@ -259,28 +287,33 @@ func mainNationwideLoop() {
 	defer ticker.Stop()
 
 	for {
-		//fmt.Println("[SM] Fetching nationwide aircraft...")
+		fmt.Println("[SM] Starting nationwide scan cycle...")
+
+		// --- NEW: Load types dynamically ---
+		specialAircraftTypes := loadSpecialTypes()
+		fmt.Printf("[SM] Loaded %d target types from config.\n", len(specialAircraftTypes))
+		// -----------------------------------
 
 		for _, acType := range specialAircraftTypes {
-			//fmt.Printf("[SM] Checking for type: %s\n", acType)
+			fmt.Printf("[SM] Checking for type: %s\n", acType)
 			apiURL := fmt.Sprintf("https://api.adsb.lol/v2/type/%s", acType)
-			//fmt.Println(apiURL)
 
 			resp, err := http.Get(apiURL)
 			if err != nil {
-				//fmt.Printf("[SM] Error fetching type %s: %v\n", acType, err)
-				continue // Try next type
+				fmt.Printf("[SM] Error fetching type %s: %v\n", acType, err)
+				continue
 			}
 			defer resp.Body.Close()
 
 			var data ADSBResponse
 			if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-				//fmt.Printf("[SM] Error decoding type %s: %v\n", acType, err)
+				// Don't print error on empty result, some types just aren't flying
+				// fmt.Printf("[SM] Error decoding type %s: %v\n", acType, err)
 				continue
 			}
 
 			if len(data.Aircraft) > 0 {
-				//fmt.Printf("[SM] Found %d aircraft of type %s\n", len(data.Aircraft), acType)
+				fmt.Printf("[SM] Found %d aircraft of type %s\n", len(data.Aircraft), acType)
 			}
 
 			for _, ac := range data.Aircraft {
@@ -288,16 +321,23 @@ func mainNationwideLoop() {
 				lastAlertTime, seen := globalNationwideState[ac.Hex]
 				nationwideStateMutex.Unlock()
 
-				// Only alert if we've never seen it, or last alert was > 24 hours ago
 				if !seen || time.Since(lastAlertTime) > (24*time.Hour) {
-					//fmt.Printf("[SM] NEW AIRCRAFT: %s (%s)\n", acType, ac.Hex)
+					fmt.Printf("[SM] NEW AIRCRAFT: %s (%s)\n", acType, ac.Hex)
 
 					details, err := getAircraftDetails(ac.Hex)
 					if err != nil {
-						//fmt.Printf("[SM] Error getting details for %s: %v\n", ac.Hex, err)
+						fmt.Printf("[SM] Error getting details for %s: %v\n", ac.Hex, err)
 					}
 
-					// Send to Channel 3
+					// Fallback if detail type is missing
+					if details.AircraftType == "" {
+						if ac.Type != "" {
+							details.AircraftType = ac.Type
+						} else {
+							details.AircraftType = acType
+						}
+					}
+
 					sendDiscordAlert(discordHookSpecialMil, ac, details, "special_military", nil)
 
 					nationwideStateMutex.Lock()
@@ -305,31 +345,27 @@ func mainNationwideLoop() {
 					nationwideStateMutex.Unlock()
 				}
 			}
-			time.Sleep(5 * time.Second) // Small delay between API calls
+			time.Sleep(5 * time.Second)
 		}
 
-		//fmt.Printf("[SM] Waiting for next poll in %v\n", nationwidePollInterval)
+		fmt.Printf("[SM] Waiting for next poll in %v\n", nationwidePollInterval)
 		<-ticker.C
 	}
 }
 
 // --- Helper Functions ---
 
-// --- UPDATED: Map Generator Helper (using Geoapify) ---
 func generateMapURL(lat, lon float64) string {
-
 	zoomLevel := 8
-
 	return fmt.Sprintf(
 		"https://maps.geoapify.com/v1/staticmap?style=osm-carto&width=500&height=300&center=lonlat:%.6f,%.6f&zoom=%d&marker=lonlat:%.6f,%.6f;type:awesome;color:red&apiKey=%s",
-		lon, lat, // Center of map (lon, lat)
-		zoomLevel, // Zoom level (smaller = higher up)
-		lon, lat,  // Location of pin (lon, lat)
+		lon, lat,
+		zoomLevel,
+		lon, lat,
 		geoapifyAPIKey,
 	)
 }
 
-// --- Math. Look away.
 func haversine(lat1, lon1, lat2, lon2 float64) float64 {
 	radLat1, radLon1 := lat1*math.Pi/180, lon1*math.Pi/180
 	radLat2, radLon2 := lat2*math.Pi/180, lon2*math.Pi/180
@@ -347,14 +383,14 @@ func processRadiusAlerts(ac Aircraft) {
 	isEmergency := (squawk == "7700" || squawk == "7600" || squawk == "7500")
 	lat, lon, hasCoords := getActualCoords(ac)
 
-	// --- Trigger 1: Watchlist Hit (Channel 1) ---
+	// --- Trigger 1: Watchlist Hit ---
 	watchlistMutex.RLock()
 	entry, onWatchlist := globalWatchlist[hex]
 	watchlistMutex.RUnlock()
 
 	if onWatchlist {
 		if !seen || !currentState.WatchlistAlerted {
-			//fmt.Printf("[Radius] !!! WATCHLIST DETECTED: %s (Note: %s)\n", hex, entry.Note)
+			fmt.Printf("[Radius] !!! WATCHLIST DETECTED: %s (Note: %s)\n", hex, entry.Note)
 			details, _ := getAircraftDetails(hex)
 			sendDiscordAlert(discordHookWatchlist, ac, details, "watchlist", &entry)
 			currentState.WatchlistAlerted = true
@@ -365,10 +401,10 @@ func processRadiusAlerts(ac Aircraft) {
 		return
 	}
 
-	// --- Trigger 2: Emergency Squawk (Channel 1) ---
+	// --- Trigger 2: Emergency Squawk ---
 	if isEmergency {
 		if !seen || currentState.LastSquawk != squawk {
-			//fmt.Printf("[Radius] !!! EMERGENCY DETECTED: %s squawking %s\n", hex, squawk)
+			fmt.Printf("[Radius] !!! EMERGENCY DETECTED: %s squawking %s\n", hex, squawk)
 			details, _ := getAircraftDetails(hex)
 			sendDiscordAlert(discordHookWatchlist, ac, details, "emergency", nil)
 		}
@@ -378,10 +414,10 @@ func processRadiusAlerts(ac Aircraft) {
 		return
 	}
 
-	// --- Trigger 3: Military Aircraft (Channel 1) ---
+	// --- Trigger 3: Military Aircraft ---
 	if ac.Mil {
 		if !seen || !currentState.MilAlerted {
-			//fmt.Printf("[Radius] !!! MILITARY DETECTED: %s\n", hex)
+			fmt.Printf("[Radius] !!! MILITARY DETECTED: %s\n", hex)
 			details, _ := getAircraftDetails(hex)
 			sendDiscordAlert(discordHookWatchlist, ac, details, "military", nil)
 			currentState.MilAlerted = true
@@ -392,19 +428,16 @@ func processRadiusAlerts(ac Aircraft) {
 		return
 	}
 
-	// --- Trigger 4: Proximity "Overhead" Alert (Channel 2) ---
-	// Only run this check if our helper function found coordinates
+	// --- Trigger 4: Proximity Alert ---
 	if hasCoords {
-		// Use the confirmed coordinates from the helper
 		distanceNM := haversine(apiLat, apiLng, lat, lon)
-
 		if distanceNM <= proximityRadiusNM {
 			altStr := formatAltitudeString(ac.AltBaro)
 			altitudeFT, err := strconv.ParseFloat(altStr, 64)
 
 			if err == nil && altitudeFT > 0 && altitudeFT <= proximityAltitudeFT {
 				if !seen || !currentState.ProximityAlerted {
-					//fmt.Printf("[Radius] !!! PROXIMITY DETECTED: %s (%.1f nm, %.0f ft)\n", ac.Hex, distanceNM, altitudeFT)
+					fmt.Printf("[Radius] !!! PROXIMITY DETECTED: %s (%.1f nm, %.0f ft)\n", ac.Hex, distanceNM, altitudeFT)
 					details, _ := getAircraftDetails(hex)
 					sendDiscordAlert(discordHookProximity, ac, details, "proximity", nil)
 					currentState.ProximityAlerted = true
@@ -416,7 +449,6 @@ func processRadiusAlerts(ac Aircraft) {
 			currentState.ProximityAlerted = false
 		}
 	} else {
-		// No coords, so can't be a proximity alert
 		currentState.ProximityAlerted = false
 	}
 
@@ -424,6 +456,7 @@ func processRadiusAlerts(ac Aircraft) {
 	currentState.LastSeen = time.Now()
 	globalRadiusState[hex] = currentState
 }
+
 func cleanupRadiusState() {
 	cutoff := time.Now().Add(-30 * time.Minute)
 	removedCount := 0
@@ -439,16 +472,15 @@ func cleanupRadiusState() {
 		delete(globalRadiusState, hex)
 		removedCount++
 	}
-	if removedCount > 0 {
-		//fmt.Printf("[Radius] State cleanup complete. Removed %d old aircraft. Tracking %d.\n", removedCount, len(globalRadiusState))
-	}
+	// if removedCount > 0 {
+	// 	fmt.Printf("[Radius] State cleanup complete. Removed %d old aircraft. Tracking %d.\n", removedCount, len(globalRadiusState))
+	// }
 }
 
 // --- On-Demand Enrichment (No-DB) ---
-// --- On-Demand Enrichment (No-DB) ---
 func getAircraftDetails(hex string) (AircraftDetail, error) {
 	var detail AircraftDetail
-	//fmt.Printf("[EN] API FETCH: Fetching details for %s from adsbdb.com\n", hex)
+	fmt.Printf("[EN] API FETCH: Fetching details for %s from adsbdb.com\n", hex)
 	apiURL := adsbdbAPIURL + hex
 
 	resp, err := http.Get(apiURL)
@@ -466,40 +498,39 @@ func getAircraftDetails(hex string) (AircraftDetail, error) {
 		return detail, fmt.Errorf("API JSON decode error for %s: %v", hex, err)
 	}
 
-	// --- UPDATED: Multi-path mapping logic ---
+	// Multi-path mapping
 	detail.Hex = hex
 	if apiResponse.Response.Aircraft.Registration != "" {
-		// --- Path 1: Commercial (nested) ---
+		// Commercial/Nested
 		detail.Registration = apiResponse.Response.Aircraft.Registration
 		detail.AircraftType = apiResponse.Response.Aircraft.Type
 		detail.Owner = apiResponse.Response.Aircraft.Owner
 		detail.ThumbnailURL = apiResponse.Response.Aircraft.ThumbnailURL
 		detail.FullImageURL = apiResponse.Response.Aircraft.FullImageURL
+		detail.CountryName = apiResponse.Response.Aircraft.CountryName
+		detail.CountryISO = apiResponse.Response.Aircraft.CountryISO
 		if apiResponse.Response.Aircraft.AirlineFlag != "" {
 			detail.Airline = apiResponse.Response.Aircraft.AirlineFlag
 		} else {
 			detail.Airline = apiResponse.Response.Aircraft.Owner
 		}
 	} else if apiResponse.Response.Registration_flat != "" {
-		// --- Path 2: Military (flat) ---
+		// Military/Flat
 		detail.Registration = apiResponse.Response.Registration_flat
 		detail.AircraftType = apiResponse.Response.Type_flat
 		detail.Owner = apiResponse.Response.Owner_flat
-		// (No images/airline for this path, so they remain "")
+		detail.CountryName = apiResponse.Response.CountryName_flat
+		detail.CountryISO = apiResponse.Response.CountryISO_flat
 	}
-	// --- END UPDATED LOGIC ---
 
 	return detail, nil
 }
 
 func sendDiscordAlert(webhookURL string, ac Aircraft, details AircraftDetail, alertType string, entry *WatchlistEntry) {
-	// --- UPDATED: Call the new coord helper ---
-	// This function now correctly finds coords from either ac.Lat OR ac.LastPos.Lat
 	lat, lon, hasCoords := getActualCoords(ac)
-	// ---
 
 	if webhookURL == "" || webhookURL == "https://discord.com/api/webhooks/..." {
-		//fmt.Printf("[Discord] Webhook for alert type '%s' is not set. Skipping.\n", alertType)
+		fmt.Printf("[Discord] Webhook for alert type '%s' is not set. Skipping.\n", alertType)
 		return
 	}
 
@@ -513,7 +544,7 @@ func sendDiscordAlert(webhookURL string, ac Aircraft, details AircraftDetail, al
 		description = fmt.Sprintf("**Note:** %s", entry.Note)
 		color = 16776960 // Yellow
 	case "emergency":
-		title = fmt.Sprintf("EMERGENCY: SQUAWK %s", ac.Squawk)
+		title = fmt.Sprintf("🔴 EMERGENCY: SQUAWK %s", ac.Squawk)
 		color = 16711680 // Red
 	case "military":
 		title = "Military Aircraft (50nm)"
@@ -523,7 +554,8 @@ func sendDiscordAlert(webhookURL string, ac Aircraft, details AircraftDetail, al
 		description = fmt.Sprintf("**Aircraft is at %s ft within 5nm**", altStr)
 		color = 16753920 // Orange
 	case "special_military":
-		title = fmt.Sprintf("Military Flight: %s", ac.Type)
+		title = fmt.Sprintf("Military Flight: %s", ac.Flight)
+		description = ""
 		color = 11290111 // Purple
 	}
 
@@ -541,14 +573,21 @@ func sendDiscordAlert(webhookURL string, ac Aircraft, details AircraftDetail, al
 		}
 	}
 
+	flagEmoji := ""
+	if details.CountryISO != "" {
+		flagEmoji = fmt.Sprintf(":flag_%s: ", strings.ToLower(details.CountryISO))
+	}
+
 	if alertType == "special_military" {
 		fields = []Field{
 			{Name: "Callsign", Value: fmt.Sprintf("`%s`", ac.Flight), Inline: true},
-			{Name: "ICAO Hex", Value: fmt.Sprintf("`%s`", ac.Hex), Inline: true},
+			{Name: "Reg", Value: fmt.Sprintf("`%s`", ac.NNumber), Inline: true},
 			{Name: "Squawk", Value: fmt.Sprintf("`%s`", ac.Squawk), Inline: true},
 			{Name: "Aircraft Type", Value: fmt.Sprintf("`%s`", finalType), Inline: true},
 			{Name: "Altitude", Value: fmt.Sprintf("%s ft", altStr), Inline: true},
 			{Name: "Speed", Value: fmt.Sprintf("%.1f kts", ac.GS), Inline: true},
+			{Name: "Owner", Value: fmt.Sprintf("%s%s", flagEmoji, details.Owner), Inline: false},
+			{Name: "Country", Value: details.CountryName, Inline: false},
 		}
 	} else {
 		fields = []Field{
@@ -573,8 +612,6 @@ func sendDiscordAlert(webhookURL string, ac Aircraft, details AircraftDetail, al
 		Footer:      Footer{Text: "ADSB.lol Alerter"},
 	}
 
-	// --- UPDATED IMAGE/THUMBNAIL LOGIC ---
-	// Only add the map if our helper function found coords
 	if hasCoords {
 		embed.Image = Image{URL: generateMapURL(lat, lon)}
 	}
@@ -582,31 +619,29 @@ func sendDiscordAlert(webhookURL string, ac Aircraft, details AircraftDetail, al
 	if details.ThumbnailURL != "" {
 		embed.Thumbnail = Thumbnail{URL: details.ThumbnailURL}
 	}
-	// --- END UPDATED LOGIC ---
 
 	payload, _ := json.Marshal(DiscordWebhook{Embeds: []Embed{embed}})
 	resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(payload))
 	if err != nil {
-		//fmt.Printf("[Discord] Error sending alert: %v\n", err)
+		fmt.Printf("[Discord] Error sending alert: %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		//fmt.Printf("[Discord] API returned non-2xx status: %s\n", resp.Status)
+		fmt.Printf("[Discord] API returned non-2xx status: %s\n", resp.Status)
 	} else {
-		//fmt.Printf("[Discord] Successfully sent alert for %s (Type: %s)\n", ac.Hex, alertType)
+		fmt.Printf("[Discord] Successfully sent alert for %s (Type: %s)\n", ac.Hex, alertType)
 	}
 }
 
-// --- Here are some format helpers
+// --- Format helpers
 func getActualCoords(ac Aircraft) (lat float64, lon float64, hasCoords bool) {
 	// 1. Try to parse top-level fields (from /v2/point)
 	lat = parseFloat(ac.Lat)
 	lon = parseFloat(ac.Lon)
 
 	if lat != 0 && lon != 0 {
-		// We found valid top-level coords.
 		return lat, lon, true
 	}
 
@@ -615,11 +650,9 @@ func getActualCoords(ac Aircraft) (lat float64, lon float64, hasCoords bool) {
 	lon = parseFloat(ac.LastPos.Lon)
 
 	if lat != 0 && lon != 0 {
-		// We found valid 'lastPosition' coords.
 		return lat, lon, true
 	}
 
-	// 3. We tried both and failed.
 	return 0, 0, false
 }
 func formatAltitudeString(alt any) string {
@@ -635,17 +668,16 @@ func formatAltitudeString(alt any) string {
 func parseFloat(val any) float64 {
 	var f float64
 	var err error
-
 	switch v := val.(type) {
 	case float64:
 		f = v
 	case string:
 		f, err = strconv.ParseFloat(v, 64)
 		if err != nil {
-			f = 0.0 // On parse error, return 0.0
+			f = 0.0
 		}
 	default:
-		f = 0.0 // Unsupported type
+		f = 0.0
 	}
 	return f
 }
